@@ -5,8 +5,6 @@ import SwiftUI
 
 struct GridPoint: Sendable {
     let index: Int
-    let xM: Double
-    let zM: Double
 
     var name: String { "P\(index + 1)" }
 }
@@ -37,7 +35,6 @@ struct SampleStore {
         let file = sessionPath.appendingPathComponent(String(format: "scan-%06d.json", round))
         let sample = Sample(
             sessionId: session.id, pointId: session.point.name, round: round,
-            xM: session.point.xM, zM: session.point.zM,
             scanStartedAtMs: Int64((scan.startedAt.timeIntervalSince1970 * 1000).rounded()),
             scanEndedAtMs: Int64((scan.endedAt.timeIntervalSince1970 * 1000).rounded()),
             accessPoints: scan.accessPoints)
@@ -51,8 +48,6 @@ struct SampleStore {
         let sessionId: UUID
         let pointId: String
         let round: Int
-        let xM: Double
-        let zM: Double
         let scanStartedAtMs: Int64
         let scanEndedAtMs: Int64
         let accessPoints: [AccessPoint]
@@ -68,6 +63,7 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var isStopping = false
     @Published private(set) var isScanning = false
     @Published private(set) var latestScan: WiFiScan?
+    @Published private(set) var latestScanInterval: TimeInterval?
     @Published private(set) var savedRounds = 0
     @Published private(set) var latestPoint: GridPoint?
     @Published private(set) var message: String?
@@ -95,28 +91,30 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
         return !latestScan.hasBSSID
     }
 
-    func start(at point: GridPoint) {
+    func start(at point: GridPoint, delayAfterScan: Duration) {
         guard !isRunning else { return }
         let newSession = CollectionSession(point: point)
         session = newSession
         latestPoint = point
         latestScan = nil
+        latestScanInterval = nil
         savedRounds = 0
         message = nil
 
         scanTask = Task { [weak self] in
-            await self?.run(.collection(newSession))
+            await self?.run(.collection(newSession), delayAfterScan: delayAfterScan)
         }
     }
 
     func showMode(localization: Bool) {
         latestScan = nil
+        latestScanInterval = nil
         message = nil
         prediction = nil
         if localization { training = WiFiKNN(directory: store.directory) }
     }
 
-    func startLocalization() {
+    func startLocalization(delayAfterScan: Duration) {
         guard !isRunning else { return }
         let model = WiFiKNN(directory: store.directory)
         training = model
@@ -124,9 +122,10 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
         isLocalizing = true
         prediction = nil
         latestScan = nil
+        latestScanInterval = nil
         message = nil
         scanTask = Task { [weak self] in
-            await self?.run(.localization(model))
+            await self?.run(.localization(model), delayAfterScan: delayAfterScan)
         }
     }
 
@@ -163,16 +162,9 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
     private enum ScanMode {
         case collection(CollectionSession)
         case localization(WiFiKNN)
-
-        var delayAfterScan: Duration {
-            switch self {
-            case .collection: return .seconds(3)
-            case .localization: return .seconds(1)
-            }
-        }
     }
 
-    private func run(_ mode: ScanMode) async {
+    private func run(_ mode: ScanMode, delayAfterScan: Duration) async {
         defer {
             session = nil
             isLocalizing = false
@@ -193,6 +185,7 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
             isScanning = false
 
             if let scan {
+                latestScanInterval = latestScan.map { max(0, scan.endedAt.timeIntervalSince($0.endedAt)) }
                 latestScan = scan
                 switch mode {
                 case .collection(let current):
@@ -215,7 +208,7 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
                 }
             }
 
-            let delay = scan?.hasBSSID == true ? mode.delayAfterScan : .seconds(3)
+            let delay = scan?.hasBSSID == true ? delayAfterScan : .seconds(3)
             do {
                 try await Task.sleep(for: delay)
             } catch {

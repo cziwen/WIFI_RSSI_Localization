@@ -6,31 +6,28 @@ struct WiFiRSSIApp: App {
         Window("Wi-Fi RSSI 采集器", id: "collector") {
             CollectorView()
         }
-        .defaultSize(width: 1040, height: 635)
+        .defaultSize(width: 1040, height: 665)
     }
 }
 
 private struct CollectorView: View {
     @StateObject private var model = CollectionModel()
-    @AppStorage("xSpacingM") private var xSpacingInput = "1"
-    @AppStorage("zSpacingM") private var zSpacingInput = "1"
+    @AppStorage("collectionDelaySeconds") private var scanDelayInput = "3"
     @AppStorage("quickCollectionMode") private var quickMode = false
     @AppStorage("quickPointA") private var quickPointA = 0
     @AppStorage("quickPointB") private var quickPointB = 8
     @State private var selected: Int?
     @State private var localization = false
 
-    private var xSpacing: Double { Double(xSpacingInput) ?? 0 }
-    private var zSpacing: Double { Double(zSpacingInput) ?? 0 }
-
-    private var validSpacing: Bool {
-        xSpacing.isFinite && zSpacing.isFinite && xSpacing > 0 && zSpacing > 0 &&
-            xSpacing <= Double.greatestFiniteMagnitude / 2 && zSpacing <= Double.greatestFiniteMagnitude / 2
+    private var scanDelay: Duration? {
+        let value = scanDelayInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let seconds = Double(value), (0...3600).contains(seconds) else { return nil }
+        return .seconds(seconds)
     }
 
     private var selectedPoint: GridPoint? {
-        guard let selected, isAvailable(selected), validSpacing else { return nil }
-        return point(selected)
+        guard let selected, isAvailable(selected) else { return nil }
+        return GridPoint(index: selected)
     }
 
     var body: some View {
@@ -41,7 +38,7 @@ private struct CollectorView: View {
                 if localization {
                     localizationPanel.frame(width: 344)
                     Divider()
-                    LocalizationMap(references: model.training?.references ?? [], prediction: model.prediction)
+                    LocalizationMap(references: model.training?.references ?? [], match: model.prediction?.nearestReference)
                 } else {
                     pointPanel.frame(width: 344)
                     Divider()
@@ -51,7 +48,7 @@ private struct CollectorView: View {
             Divider()
             footer
         }
-        .frame(minWidth: 930, minHeight: 605)
+        .frame(minWidth: 930, minHeight: 640)
         .onDisappear(perform: model.stop)
         .onChange(of: localization) { model.showMode(localization: $0) }
     }
@@ -88,7 +85,7 @@ private struct CollectorView: View {
 
     private var localizationPanel: some View {
         VStack(alignment: .leading, spacing: 15) {
-            Label("加权 KNN（k = 3）", systemImage: "location.viewfinder")
+            Label("Wi-Fi 指纹匹配", systemImage: "location.viewfinder")
                 .font(.headline)
             if let training = model.training {
                 Text("指纹库 · \(training.sampleCount) 轮 · \(training.references.count) 个参考点")
@@ -98,18 +95,18 @@ private struct CollectorView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if !training.canLocate {
-                    Text("需要至少两个不同坐标的有效样本。")
+                    Text("需要至少两个参考点的有效样本。")
                         .foregroundStyle(.orange)
                 }
             }
 
             Divider()
-            Text("估计坐标 (X, Z)").font(.caption).foregroundStyle(.secondary)
+            Text("最相似参考点").font(.caption).foregroundStyle(.secondary)
             if let prediction = model.prediction {
-                Text(coordinate(prediction.position))
+                Text(prediction.nearestReference)
                     .font(.system(.title, design: .monospaced).weight(.semibold))
                     .foregroundStyle(Color.accentColor)
-                Text("最相似参考点 \(prediction.nearestReference) · 重合 AP \(prediction.matchedAccessPoints) 个")
+                Text("重合 AP \(prediction.matchedAccessPoints) 个")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text(model.isLocalizing ? "等待有效扫描…" : "启动后随扫描更新")
@@ -119,10 +116,6 @@ private struct CollectorView: View {
                 Label(message, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            if model.training?.references.count == 2 {
-                Text("两个参考点时，估计位置会沿两点之间的虚线移动。")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if model.isLocalizing {
@@ -134,12 +127,16 @@ private struct CollectorView: View {
                 .tint(.red)
                 .disabled(model.isStopping)
             } else {
-                Button(action: model.startLocalization) {
+                Button {
+                    if let delay = scanDelay {
+                        model.startLocalization(delayAfterScan: delay)
+                    }
+                } label: {
                     Label("开始定位", systemImage: "location.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.training?.canLocate != true)
+                .disabled(model.training?.canLocate != true || scanDelay == nil)
             }
         }
         .controlSize(.large)
@@ -149,11 +146,7 @@ private struct CollectorView: View {
 
     private var pointPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("教室点位").font(.headline)
-                Spacer()
-                Text("X 向右 · Z 向下").font(.caption).foregroundStyle(.secondary)
-            }
+            Text("教室点位").font(.headline)
             pointModeControls
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                 ForEach(0..<9) { index in
@@ -162,15 +155,6 @@ private struct CollectorView: View {
             }
             .disabled(model.session != nil)
 
-            HStack(spacing: 14) {
-                spacingField("X 间距", value: $xSpacingInput)
-                spacingField("Z 间距", value: $zSpacingInput)
-            }
-            .disabled(model.session != nil)
-            Text(validSpacing ? "坐标单位为米。采集时将 Mac 放在所选方块的实测中心。" : "X 和 Z 间距都必须是大于零的数。")
-                .font(.caption)
-                .foregroundStyle(validSpacing ? Color.secondary : Color.orange)
-                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
             HStack(spacing: 10) {
                 if model.session != nil {
@@ -183,19 +167,37 @@ private struct CollectorView: View {
                     .disabled(model.isStopping)
                 } else {
                     Button {
-                        if let selectedPoint { model.start(at: selectedPoint) }
+                        if let selectedPoint, let delay = scanDelay {
+                            model.start(at: selectedPoint, delayAfterScan: delay)
+                        }
                     } label: {
                         Label("开始采集", systemImage: "record.circle")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(selectedPoint == nil)
+                    .disabled(selectedPoint == nil || scanDelay == nil)
                 }
             }
             .controlSize(.large)
         }
         .padding(20)
         .background(.quaternary.opacity(0.28))
+    }
+
+    private var delayControl: some View {
+        let valid = scanDelay != nil
+        return HStack(spacing: 8) {
+            Text("轮间等待").font(.caption)
+            TextField("轮间等待（秒）", text: $scanDelayInput)
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 55)
+                .disabled(model.isRunning)
+            Text("秒").font(.caption)
+            Text(valid ? "0 秒为最快" : "请输入 0–3600")
+                .font(.caption)
+                .foregroundStyle(valid ? Color.secondary : Color.orange)
+        }
     }
 
     private var pointModeControls: some View {
@@ -221,7 +223,7 @@ private struct CollectorView: View {
     private func quickPointPicker(_ label: String, selection: Binding<Int>, excluding other: Int) -> some View {
         Picker(label, selection: selection) {
             ForEach((0..<9).filter { $0 != other }, id: \.self) { index in
-                Text(point(index).name).tag(index)
+                Text(GridPoint(index: index).name).tag(index)
             }
         }
         .pickerStyle(.menu)
@@ -232,21 +234,15 @@ private struct CollectorView: View {
     }
 
     private func pointButton(_ index: Int) -> some View {
-        let point = point(index)
+        let point = GridPoint(index: index)
         let available = isAvailable(index)
         let isSelected = available && index == selected
         return Button {
             selected = index
         } label: {
-            VStack(spacing: 4) {
-                Text(point.name).font(.system(.body, design: .monospaced).weight(.semibold))
-                Text(validSpacing ? coordinate(point) : "—")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-            }
-            .frame(maxWidth: .infinity, minHeight: 60)
+            Text(point.name)
+                .font(.system(.body, design: .monospaced).weight(.semibold))
+                .frame(maxWidth: .infinity, minHeight: 60)
             .background(
                 isSelected ? Color.accentColor.opacity(0.15) : Color(nsColor: .controlBackgroundColor),
                 in: RoundedRectangle(cornerRadius: 9))
@@ -259,19 +255,8 @@ private struct CollectorView: View {
         .buttonStyle(.plain)
         .opacity(available ? 1 : 0.5)
         .disabled(!available)
-        .accessibilityLabel("\(point.name) \(validSpacing ? coordinate(point) : "")")
+        .accessibilityLabel(point.name)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-
-    private func spacingField(_ title: String, value: Binding<String>) -> some View {
-        HStack(spacing: 5) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            TextField(title, text: value)
-                .labelsHidden()
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 45, maxWidth: 65)
-            Text("m").font(.caption).foregroundStyle(.secondary)
-        }
     }
 
     private var scanPanel: some View {
@@ -280,7 +265,7 @@ private struct CollectorView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("接入点读数").font(.headline)
                     if let point = model.latestPoint {
-                        Text("\(point.name) · \(coordinate(point)) m")
+                        Text(point.name)
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
@@ -353,6 +338,13 @@ private struct CollectorView: View {
                     .accessibilityHidden(true)
                 Text(status)
                 Spacer()
+                delayControl
+                Spacer()
+                if let interval = model.latestScanInterval {
+                    let seconds = interval.formatted(.number.precision(.fractionLength(2)))
+                    Text("实际轮间隔 \(seconds) 秒")
+                        .monospacedDigit()
+                }
                 if let scan = model.latestScan {
                     let time = scan.endedAt.formatted(date: .omitted, time: .standard)
                     let elapsed = scan.endedAt.timeIntervalSince(scan.startedAt)
@@ -376,18 +368,7 @@ private struct CollectorView: View {
         return model.latestPoint == nil ? "待采集" : "采集已停止"
     }
 
-    private func point(_ index: Int) -> GridPoint {
-        GridPoint(index: index, xM: Double(index % 3) * xSpacing, zM: Double(index / 3) * zSpacing)
-    }
 
-    private func coordinate(_ point: GridPoint) -> String {
-        coordinate(FloorPosition(x: point.xM, z: point.zM))
-    }
-
-    private func coordinate(_ point: FloorPosition) -> String {
-        let format = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0...3))
-        return "(\(point.x.formatted(format)), \(point.z.formatted(format)))"
-    }
 }
 
 private struct ScanRow: Identifiable {
