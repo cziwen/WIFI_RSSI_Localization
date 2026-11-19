@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>WiFiRSSI</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.wifirssi.collector</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Wi-Fi RSSI Collector</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSLocationUsageDescription</key>
+    <string>macOS 需要定位权限才能读取 Wi-Fi 网络名称（SSID）和接入点标识（BSSID）。</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>macOS 需要定位权限才能读取 Wi-Fi 网络名称（SSID）和接入点标识（BSSID）。</string>
+</dict>
+</plist>
