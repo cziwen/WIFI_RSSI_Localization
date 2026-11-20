@@ -16,7 +16,13 @@ private struct CollectorView: View {
     @AppStorage("quickPointA") private var quickPointA = 0
     @AppStorage("quickPointB") private var quickPointB = 8
     @State private var selected: Int?
-    @State private var localization = false
+    @State private var mode = Mode.collection
+
+    private enum Mode {
+        case collection, localization, quality
+    }
+
+    private var localization: Bool { mode == .localization }
 
     private var selectedPoint: GridPoint? {
         guard let selected, isAvailable(selected) else { return nil }
@@ -28,22 +34,33 @@ private struct CollectorView: View {
             header
             Divider()
             HStack(spacing: 0) {
-                if localization {
-                    localizationPanel.frame(width: 344)
-                    Divider()
-                    LocalizationMap(references: model.training?.references ?? [], prediction: model.prediction)
+                if mode == .quality {
+                    FingerprintQualityView(directory: model.sampleDirectory)
+                } else if localization {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let fix = model.localizationFix
+                        let current = fix?.isCurrent(at: context.date) == true
+                        HStack(spacing: 0) {
+                            localizationPanel(fix: fix, current: current).frame(width: 344)
+                            Divider()
+                            LocalizationMap(references: model.training?.references ?? [],
+                                            match: current ? fix?.prediction.point.name : nil)
+                        }
+                    }
                 } else {
                     pointPanel.frame(width: 344)
                     Divider()
                     scanPanel
                 }
             }
-            Divider()
-            footer
+            if mode != .quality {
+                Divider()
+                footer
+            }
         }
         .frame(minWidth: 930, minHeight: 640)
         .onDisappear(perform: model.stop)
-        .onChange(of: localization) { model.showMode(localization: $0) }
+        .onChange(of: mode) { model.showMode(localization: $0 == .localization) }
     }
 
     private var header: some View {
@@ -59,13 +76,14 @@ private struct CollectorView: View {
                 Text("采集 Wi-Fi 指纹与室内定位").foregroundStyle(.secondary)
             }
             Spacer()
-            Picker("工作模式", selection: $localization) {
-                Text("采集").tag(false)
-                Text("实时定位").tag(true)
+            Picker("工作模式", selection: $mode) {
+                Text("采集").tag(Mode.collection)
+                Text("实时定位").tag(Mode.localization)
+                Text("数据检查").tag(Mode.quality)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 190)
+            .frame(width: 270)
             .disabled(model.isRunning)
             Spacer()
             Button(action: model.openSamples) {
@@ -76,11 +94,13 @@ private struct CollectorView: View {
         .padding(.vertical, 14)
     }
 
-    private var localizationPanel: some View {
+    private func localizationPanel(fix: LocalizationFix?, current: Bool) -> some View {
         VStack(alignment: .leading, spacing: 15) {
-            Label("\(WiFiKNN.neighborCount)-NN 回归", systemImage: "location.viewfinder")
+            Label("\(WiFiKNN.neighborCount)-NN 分类", systemImage: "location.viewfinder")
                 .font(.headline)
             if let training = model.training {
+                Text("\(WiFiKNN.featureFilter.rawValue) · \(training.featureCount) 个 AP")
+                    .foregroundStyle(.secondary)
                 Text("指纹库 · \(training.sampleCount) 条指纹 · \(training.references.count) 个参考点")
                     .foregroundStyle(.secondary)
                 if training.duplicateCount > 0 {
@@ -98,17 +118,31 @@ private struct CollectorView: View {
             }
 
             Divider()
-            Text("估计网格位置（列，行）").font(.caption).foregroundStyle(.secondary)
-            if let prediction = model.prediction {
-                let format = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0...2))
-                Text("(\(prediction.column.formatted(format)), \(prediction.row.formatted(format)))")
+            Text("预测点位").font(.caption).foregroundStyle(.secondary)
+            if let fix, current {
+                Text(fix.prediction.point.name)
                     .font(.system(.title, design: .monospaced).weight(.semibold))
                     .foregroundStyle(Color.accentColor)
-                Text("使用 \(prediction.neighborsUsed) 个近邻")
-                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(fix.prediction.closest, id: \.point) { match in
+                    let distance = sqrt(match.distance).formatted(.number.precision(.fractionLength(1)))
+                    Text("\(match.point.name) · 距离 \(distance) · 重合 \(match.overlap) 个 AP")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 Text(model.isLocalizing ? "等待有效扫描…" : "启动后随扫描更新")
                     .foregroundStyle(.secondary)
+            }
+            if let fix {
+                Text("上次有效定位 \(fix.time.formatted(date: .omitted, time: .standard))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            if model.isLocalizing && model.latestScan?.isRapidResponse == true {
+                Text("已跳过快速返回，等待下一轮有效扫描。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let message = model.message {
                 Label(message, systemImage: "exclamationmark.triangle")
@@ -322,14 +356,14 @@ private struct CollectorView: View {
                 Spacer()
                 if let interval = model.latestScanInterval {
                     let seconds = interval.formatted(.number.precision(.fractionLength(2)))
-                    Text("实际轮间隔 \(seconds) 秒")
+                    Text("API 返回间隔 \(seconds) 秒")
                         .monospacedDigit()
                 }
                 if let scan = model.latestScan {
                     let time = scan.endedAt.formatted(date: .omitted, time: .standard)
                     let elapsed = scan.endedAt.timeIntervalSince(scan.startedAt)
                         .formatted(.number.precision(.fractionLength(2)))
-                    Text("上次扫描 \(time) · 耗时 \(elapsed) 秒")
+                    Text("上次 API 返回 \(time) · 耗时 \(elapsed) 秒")
                         .monospacedDigit()
                 }
             }

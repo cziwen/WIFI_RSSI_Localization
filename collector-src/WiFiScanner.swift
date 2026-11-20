@@ -28,9 +28,15 @@ struct AccessPoint: Codable, Sendable {
 }
 
 struct WiFiScan: Sendable {
+    static let rapidResponseThreshold: TimeInterval = 0.5
+
     let startedAt: Date
     let endedAt: Date
     let accessPoints: [AccessPoint]
+
+    var isRapidResponse: Bool {
+        (0...Self.rapidResponseThreshold).contains(endedAt.timeIntervalSince(startedAt))
+    }
 
     var hasBSSID: Bool {
         accessPoints.contains { !($0.bssid?.isEmpty ?? true) }

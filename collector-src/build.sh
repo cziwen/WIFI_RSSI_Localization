@@ -14,7 +14,8 @@ for arch in arm64 x86_64; do
     xcrun swiftc -O -parse-as-library -target "$arch-apple-macos13" \
         -module-cache-path "$build_dir/module-cache" \
         "$source_dir/WiFiScanner.swift" "$source_dir/CollectionModel.swift" \
-        "$source_dir/KNN.swift" "$source_dir/LocalizationMap.swift" "$source_dir/CollectorApp.swift" -o "$build_dir/WiFiRSSI-$arch"
+        "$source_dir/FingerprintDataset.swift" "$source_dir/FingerprintQuality.swift" \
+        "$source_dir/FingerprintQualityView.swift" "$source_dir/KNN.swift" "$source_dir/LocalizationMap.swift" "$source_dir/CollectorApp.swift" -o "$build_dir/WiFiRSSI-$arch"
 done
 
 xcrun lipo -create "$build_dir/WiFiRSSI-arm64" "$build_dir/WiFiRSSI-x86_64" \
