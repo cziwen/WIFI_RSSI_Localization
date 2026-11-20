@@ -12,18 +12,11 @@ struct WiFiRSSIApp: App {
 
 private struct CollectorView: View {
     @StateObject private var model = CollectionModel()
-    @AppStorage("collectionDelaySeconds") private var scanDelayInput = "3"
     @AppStorage("quickCollectionMode") private var quickMode = false
     @AppStorage("quickPointA") private var quickPointA = 0
     @AppStorage("quickPointB") private var quickPointB = 8
     @State private var selected: Int?
     @State private var localization = false
-
-    private var scanDelay: Duration? {
-        let value = scanDelayInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let seconds = Double(value), (0...3600).contains(seconds) else { return nil }
-        return .seconds(seconds)
-    }
 
     private var selectedPoint: GridPoint? {
         guard let selected, isAvailable(selected) else { return nil }
@@ -38,7 +31,7 @@ private struct CollectorView: View {
                 if localization {
                     localizationPanel.frame(width: 344)
                     Divider()
-                    LocalizationMap(references: model.training?.references ?? [], match: model.prediction?.nearestReference)
+                    LocalizationMap(references: model.training?.references ?? [], prediction: model.prediction)
                 } else {
                     pointPanel.frame(width: 344)
                     Divider()
@@ -85,11 +78,15 @@ private struct CollectorView: View {
 
     private var localizationPanel: some View {
         VStack(alignment: .leading, spacing: 15) {
-            Label("Wi-Fi 指纹匹配", systemImage: "location.viewfinder")
+            Label("\(WiFiKNN.neighborCount)-NN 回归", systemImage: "location.viewfinder")
                 .font(.headline)
             if let training = model.training {
-                Text("指纹库 · \(training.sampleCount) 轮 · \(training.references.count) 个参考点")
+                Text("指纹库 · \(training.sampleCount) 条指纹 · \(training.references.count) 个参考点")
                     .foregroundStyle(.secondary)
+                if training.duplicateCount > 0 {
+                    Text("已合并 \(training.duplicateCount) 条重复指纹")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if training.ignoredCount > 0 {
                     Text("已跳过 \(training.ignoredCount) 份无效样本")
                         .font(.caption).foregroundStyle(.secondary)
@@ -101,12 +98,13 @@ private struct CollectorView: View {
             }
 
             Divider()
-            Text("最相似参考点").font(.caption).foregroundStyle(.secondary)
+            Text("估计网格位置（列，行）").font(.caption).foregroundStyle(.secondary)
             if let prediction = model.prediction {
-                Text(prediction.nearestReference)
+                let format = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0...2))
+                Text("(\(prediction.column.formatted(format)), \(prediction.row.formatted(format)))")
                     .font(.system(.title, design: .monospaced).weight(.semibold))
                     .foregroundStyle(Color.accentColor)
-                Text("重合 AP \(prediction.matchedAccessPoints) 个")
+                Text("使用 \(prediction.neighborsUsed) 个近邻")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text(model.isLocalizing ? "等待有效扫描…" : "启动后随扫描更新")
@@ -127,16 +125,12 @@ private struct CollectorView: View {
                 .tint(.red)
                 .disabled(model.isStopping)
             } else {
-                Button {
-                    if let delay = scanDelay {
-                        model.startLocalization(delayAfterScan: delay)
-                    }
-                } label: {
+                Button(action: model.startLocalization) {
                     Label("开始定位", systemImage: "location.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.training?.canLocate != true || scanDelay == nil)
+                .disabled(model.training?.canLocate != true)
             }
         }
         .controlSize(.large)
@@ -167,37 +161,21 @@ private struct CollectorView: View {
                     .disabled(model.isStopping)
                 } else {
                     Button {
-                        if let selectedPoint, let delay = scanDelay {
-                            model.start(at: selectedPoint, delayAfterScan: delay)
+                        if let selectedPoint {
+                            model.start(at: selectedPoint)
                         }
                     } label: {
                         Label("开始采集", systemImage: "record.circle")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(selectedPoint == nil || scanDelay == nil)
+                    .disabled(selectedPoint == nil)
                 }
             }
             .controlSize(.large)
         }
         .padding(20)
         .background(.quaternary.opacity(0.28))
-    }
-
-    private var delayControl: some View {
-        let valid = scanDelay != nil
-        return HStack(spacing: 8) {
-            Text("轮间等待").font(.caption)
-            TextField("轮间等待（秒）", text: $scanDelayInput)
-                .labelsHidden()
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 55)
-                .disabled(model.isRunning)
-            Text("秒").font(.caption)
-            Text(valid ? "0 秒为最快" : "请输入 0–3600")
-                .font(.caption)
-                .foregroundStyle(valid ? Color.secondary : Color.orange)
-        }
     }
 
     private var pointModeControls: some View {
@@ -271,8 +249,12 @@ private struct CollectorView: View {
                     }
                 }
                 Spacer()
-                Text("已保存 \(model.savedRounds) 轮")
-                    .font(.system(.callout, design: .monospaced).weight(.semibold))
+                HStack(spacing: 12) {
+                    Text("请求 \(model.requestedRounds) 轮")
+                    Text("跳过 \(model.skippedRounds) 轮")
+                    Text("已保存 \(model.savedRounds) 轮").fontWeight(.semibold)
+                }
+                .font(.callout.monospacedDigit())
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 13)
@@ -337,8 +319,6 @@ private struct CollectorView: View {
                     .frame(width: 7, height: 7)
                     .accessibilityHidden(true)
                 Text(status)
-                Spacer()
-                delayControl
                 Spacer()
                 if let interval = model.latestScanInterval {
                     let seconds = interval.formatted(.number.precision(.fractionLength(2)))

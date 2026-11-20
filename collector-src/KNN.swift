@@ -1,14 +1,18 @@
 import Foundation
 
 struct KNNPrediction {
-    let nearestReference: String
-    let matchedAccessPoints: Int
+    let column: Double
+    let row: Double
+    let neighborsUsed: Int
 }
 
 struct WiFiKNN {
+    static let neighborCount = 3
+
     let references: Set<String>
     let sampleCount: Int
     let ignoredCount: Int
+    let duplicateCount: Int
 
     private let fingerprints: [Fingerprint]
     private let knownBSSIDs: Set<String>
@@ -16,26 +20,28 @@ struct WiFiKNN {
     var canLocate: Bool { references.count >= 2 }
 
     init(directory: URL) {
-        let entries = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil,
-                                                     options: [.skipsHiddenFiles])
-        let files = (entries?.allObjects as? [URL] ?? []).filter {
-            $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix("scan-")
-        }.sorted { $0.path < $1.path }
+        let files = SampleStore.scanFiles(in: directory)
         let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let gridLabels = Set((0..<9).map { GridPoint(index: $0).name })
-        let fingerprints: [Fingerprint] = files.compactMap { file in
+        let gridPoints = Dictionary(uniqueKeysWithValues: (0..<9).map { index in
+            let point = GridPoint(index: index)
+            return (point.name, point)
+        })
+        let validFingerprints: [Fingerprint] = files.compactMap { file in
             guard let data = try? Data(contentsOf: file),
-                  let sample = try? decoder.decode(SavedFingerprint.self, from: data),
-                  gridLabels.contains(sample.pointId) else { return nil }
+                  let sample = try? decoder.decode(SampleStore.StoredScan.self, from: data),
+                  let point = gridPoints[sample.pointId] else { return nil }
             let signals = Self.signals(from: sample.accessPoints)
             guard !signals.isEmpty else { return nil }
-            return Fingerprint(reference: sample.pointId, signals: signals)
+            return Fingerprint(point: point, signals: signals)
         }
+        // Identical readings at the same point should occupy just one neighbor slot.
+        var seen = Set<Fingerprint>()
+        let fingerprints = validFingerprints.filter { seen.insert($0).inserted }
         self.fingerprints = fingerprints
         sampleCount = fingerprints.count
-        ignoredCount = files.count - fingerprints.count
-        references = Set(fingerprints.map(\.reference))
+        ignoredCount = files.count - validFingerprints.count
+        duplicateCount = validFingerprints.count - fingerprints.count
+        references = Set(fingerprints.map { $0.point.name })
         knownBSSIDs = fingerprints.reduce(into: []) { $0.formUnion($1.signals.keys) }
     }
 
@@ -44,7 +50,7 @@ struct WiFiKNN {
         let requiredMatches = min(3, knownBSSIDs.count)
         guard canLocate, observed.count >= requiredMatches else { return nil }
 
-        let best = fingerprints.lazy.compactMap { fingerprint -> Neighbor? in
+        let neighbors = fingerprints.compactMap { fingerprint -> Neighbor? in
             let overlap = observed.keys.reduce(into: 0) { count, bssid in
                 if fingerprint.signals[bssid] != nil { count += 1 }
             }
@@ -57,12 +63,15 @@ struct WiFiKNN {
                 return sum + delta * delta
             }
             // Mean squared distance has the same ranking as root mean square distance.
-            return Neighbor(reference: fingerprint.reference, distance: sum / Double(keys.count),
-                            matchedAccessPoints: overlap)
-        }.min(by: { $0.distance < $1.distance })
+            return Neighbor(point: fingerprint.point, distance: sum / Double(keys.count))
+        }.sorted { $0.distance < $1.distance }.prefix(Self.neighborCount)
 
-        guard let best else { return nil }
-        return KNNPrediction(nearestReference: best.reference, matchedAccessPoints: best.matchedAccessPoints)
+        guard !neighbors.isEmpty else { return nil }
+        let columns = neighbors.reduce(0) { $0 + $1.point.column }
+        let rows = neighbors.reduce(0) { $0 + $1.point.row }
+        return KNNPrediction(column: Double(columns) / Double(neighbors.count),
+                             row: Double(rows) / Double(neighbors.count),
+                             neighborsUsed: neighbors.count)
     }
 
     private static func signals(from accessPoints: [AccessPoint]) -> [String: Int] {
@@ -72,19 +81,13 @@ struct WiFiKNN {
         }
     }
 
-    private struct SavedFingerprint: Decodable {
-        let pointId: String
-        let accessPoints: [AccessPoint]
-    }
-
-    private struct Fingerprint {
-        let reference: String
+    private struct Fingerprint: Hashable {
+        let point: GridPoint
         let signals: [String: Int]
     }
 
     private struct Neighbor {
-        let reference: String
+        let point: GridPoint
         let distance: Double
-        let matchedAccessPoints: Int
     }
 }
