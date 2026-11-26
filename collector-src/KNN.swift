@@ -5,6 +5,8 @@ struct KNNPrediction {
     let closest: [Match]
     let band: Band
     let scanCount: Int
+    /// False when the 5 GHz answer and the all-band answer name different points.
+    var bandsAgree = true
 
     enum Band: String {
         case fiveGHz = "5 GHz", all = "全部频段"
@@ -23,7 +25,10 @@ struct KNNPrediction {
         return (closest[0].distance / closest[1].distance).squareRoot()
     }
 
-    var isConfident: Bool { ratio < WiFiKNN.confidenceThreshold }
+    /// With `requireAgreement`, a 5 GHz / all-band disagreement also counts as unsure.
+    func isConfident(requireAgreement: Bool) -> Bool {
+        ratio < WiFiKNN.confidenceThreshold && (!requireAgreement || bandsAgree)
+    }
 }
 
 struct LocalizationFix {
@@ -90,17 +95,19 @@ struct WiFiKNN {
     /// Matches on 5 GHz first; falls back to all bands when 5 GHz cannot rank at least two labels.
     func predict(scans: [[AccessPoint]]) -> KNNPrediction? {
         let observed = Self.combine(scans)
-        if let fiveGHz = match(observed, in: fiveGHzFingerprints, bssids: fiveGHzBSSIDs,
+        let all = match(observed, in: fingerprints, bssids: knownBSSIDs, band: .all, scanCount: scans.count)
+        if var fiveGHz = match(observed, in: fiveGHzFingerprints, bssids: fiveGHzBSSIDs,
                                band: .fiveGHz, scanCount: scans.count),
            fiveGHz.closest.count >= 2 {
+            fiveGHz.bandsAgree = all.map { $0.closest.count >= 2 && $0.point == fiveGHz.point } ?? false
             return fiveGHz
         }
-        return match(observed, in: fingerprints, bssids: knownBSSIDs, band: .all, scanCount: scans.count)
+        return all
     }
 
     /// A request is finished when the prediction is confident, or no more scans are allowed.
-    static func isFinished(_ prediction: KNNPrediction?, scanCount: Int) -> Bool {
-        prediction?.isConfident == true || scanCount >= maxScans
+    static func isFinished(_ prediction: KNNPrediction?, scanCount: Int, requireAgreement: Bool) -> Bool {
+        prediction?.isConfident(requireAgreement: requireAgreement) == true || scanCount >= maxScans
     }
 
     private func match(_ signals: [String: Double], in fingerprints: [Fingerprint], bssids: Set<String>,

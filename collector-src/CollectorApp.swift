@@ -126,7 +126,8 @@ private struct CollectorView: View {
                     .font(.system(.title, design: .monospaced).weight(.semibold))
                     .foregroundStyle(Color.accentColor)
                 let r = fix.prediction.ratio.formatted(.number.precision(.fractionLength(2)))
-                Text("r = \(r) · \(fix.prediction.band.rawValue) · 扫描 \(fix.prediction.scanCount) 次")
+                Text("r = \(r) · \(fix.prediction.band.rawValue) · 扫描 \(fix.prediction.scanCount) 次"
+                     + (fix.prediction.bandsAgree ? "" : " · 双频不一致"))
                     .font(.caption.monospacedDigit())
                 ForEach(fix.prediction.closest, id: \.point) { match in
                     let distance = sqrt(match.distance).formatted(.number.precision(.fractionLength(1)))
@@ -164,6 +165,9 @@ private struct CollectorView: View {
             }
             Spacer()
             Divider()
+            Toggle("双频一致性检查（5 GHz 与全部频段结论不同时重扫）", isOn: $model.requireBandAgreement)
+                .font(.caption)
+                .disabled(model.isRunning)
             Picker("实际点位", selection: $model.truthPoint) {
                 Text("不记录").tag(GridPoint?.none)
                 ForEach(0..<9) { index in
@@ -172,7 +176,7 @@ private struct CollectorView: View {
             }
             .disabled(model.isRunning)
             if let truth = model.truthPoint {
-                Text("实时测试：\(truth.name) 已记录 \(model.trialCounts[truth] ?? 0) 次 → live-tests/")
+                Text("实时测试：\(truth.name) 已记录 \(model.loggedTrials)/\(CollectionModel.trialsPerPoint) 次，满后自动停止并提示音")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }

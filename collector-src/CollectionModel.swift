@@ -154,15 +154,21 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
     /// The point the Mac is really at during a live test. When set, each finished request is logged.
     @Published var truthPoint: GridPoint?
-    @Published private(set) var trialCounts: [GridPoint: Int] = [:]
+    /// Requests logged since the last start. The run stops by itself at `trialsPerPoint`.
+    @Published private(set) var loggedTrials = 0
+    static let trialsPerPoint = 5
     /// Prediction from the scans so far while the request is still unsure.
     @Published private(set) var pendingPrediction: KNNPrediction?
     @Published private(set) var pendingScanCount = 0
+    /// Also treat a 5 GHz / all-band disagreement as unsure.
+    @Published var requireBandAgreement = false
 
     private let scanner = WiFiScanner()
     private let store = SampleStore()
     private let location = CLLocationManager()
     private var scanTask: Task<Void, Never>?
+    /// Last scan used for localization; an identical result is a cached repeat (same rule as collection).
+    private var lastLocalizationReadings: [SampleStore.Reading]?
     private var pendingScans: [WiFiScan] = [] {
         didSet { pendingScanCount = pendingScans.count }
     }
@@ -222,6 +228,8 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
         localizationFix = nil
         pendingScans = []
         pendingPrediction = nil
+        loggedTrials = 0
+        lastLocalizationReadings = nil
         latestScan = nil
         latestScanInterval = nil
         message = nil
@@ -306,9 +314,9 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
                         message = "保存失败，采集已停止。\(error.localizedDescription)"
                         return
                     }
-                case .localization(let model):
+                case .localization:
                     if Task.isCancelled { return }
-                    locate(with: scan, model: model)
+                    locate(with: scan)
                 }
             }
 
@@ -322,7 +330,8 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     /// One request = 1…maxScans scans. Rescan while unsure, then publish the fix and start a new request.
-    private func locate(with scan: WiFiScan, model: WiFiKNN) {
+    private func locate(with scan: WiFiScan) {
+        guard let model = training else { return }
         guard scan.hasBSSID else {
             message = "本轮没有 BSSID。请检查 macOS 定位权限。"
             return
@@ -331,22 +340,33 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
             message = nil
             return
         }
+        let readings = SampleStore.fingerprint(from: scan.accessPoints)
+        guard readings != lastLocalizationReadings else {
+            message = "本轮与上一次扫描完全相同（疑似缓存），已跳过。"
+            return
+        }
+        lastLocalizationReadings = readings
         pendingScans.append(scan)
         let prediction = model.predict(scans: pendingScans.map(\.accessPoints))
         message = prediction == nil ? "与指纹库重合的接入点太少。" : nil
-        guard WiFiKNN.isFinished(prediction, scanCount: pendingScans.count) else {
+        guard WiFiKNN.isFinished(prediction, scanCount: pendingScans.count,
+                                 requireAgreement: requireBandAgreement) else {
             pendingPrediction = prediction
             return
         }
         if let prediction {
             localizationFix = LocalizationFix(prediction: prediction, time: scan.endedAt)
         }
-        logTrial(prediction)
+        logTrial(prediction, unsure: prediction?.isConfident(requireAgreement: requireBandAgreement) != true)
         pendingScans = []
         pendingPrediction = nil
+        if truthPoint != nil, loggedTrials >= Self.trialsPerPoint {
+            NSSound(named: "Glass")?.play()
+            stop()
+        }
     }
 
-    private func logTrial(_ prediction: KNNPrediction?) {
+    private func logTrial(_ prediction: KNNPrediction?, unsure: Bool) {
         guard let truthPoint, let first = pendingScans.first, let last = pendingScans.last else { return }
         func ms(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1000).rounded()) }
         let trial = LiveTrial(
@@ -354,6 +374,8 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
             correct: prediction?.point == truthPoint, ratio: prediction?.ratio,
             band: prediction?.band.rawValue, scanCount: pendingScans.count,
             threshold: WiFiKNN.confidenceThreshold,
+            bandAgreementRequired: requireBandAgreement, bandsAgree: prediction?.bandsAgree,
+            unsure: unsure,
             latencyS: last.endedAt.timeIntervalSince(first.startedAt),
             scans: pendingScans.map {
                 LiveTrial.Scan(startedAtMs: ms($0.startedAt), endedAtMs: ms($0.endedAt),
@@ -375,7 +397,7 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
             } else {
                 try line.write(to: file)
             }
-            trialCounts[truthPoint, default: 0] += 1
+            loggedTrials += 1
         } catch {
             message = "实时测试记录写入失败：\(error.localizedDescription)"
         }
@@ -395,6 +417,10 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
         let band: String?
         let scanCount: Int
         let threshold: Double
+        let bandAgreementRequired: Bool
+        let bandsAgree: Bool?
+        /// Still unsure after the last scan.
+        let unsure: Bool
         let latencyS: Double
         let scans: [Scan]
     }
