@@ -152,11 +152,24 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
     @Published private(set) var latestPoint: GridPoint?
     @Published private(set) var message: String?
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
+    /// The point the Mac is really at during a live test. When set, each finished request is logged.
+    @Published var truthPoint: GridPoint?
+    @Published private(set) var trialCounts: [GridPoint: Int] = [:]
+    /// Prediction from the scans so far while the request is still unsure.
+    @Published private(set) var pendingPrediction: KNNPrediction?
+    @Published private(set) var pendingScanCount = 0
 
     private let scanner = WiFiScanner()
     private let store = SampleStore()
     private let location = CLLocationManager()
     private var scanTask: Task<Void, Never>?
+    private var pendingScans: [WiFiScan] = [] {
+        didSet { pendingScanCount = pendingScans.count }
+    }
+
+    var liveTestDirectory: URL {
+        store.directory.deletingLastPathComponent().appendingPathComponent("live-tests", isDirectory: true)
+    }
 
     var isRunning: Bool { session != nil || isLocalizing }
 
@@ -207,6 +220,8 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
         guard model.canLocate else { return }
         isLocalizing = true
         localizationFix = nil
+        pendingScans = []
+        pendingPrediction = nil
         latestScan = nil
         latestScanInterval = nil
         message = nil
@@ -293,16 +308,7 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
                     }
                 case .localization(let model):
                     if Task.isCancelled { return }
-                    localizationFix = model.updateLocation(with: scan, previous: localizationFix)
-                    if !scan.hasBSSID {
-                        message = "本轮没有 BSSID。请检查 macOS 定位权限。"
-                    } else if scan.isRapidResponse {
-                        message = nil
-                    } else if localizationFix == nil {
-                        message = "本轮与指纹库重合的接入点太少，等待下一次扫描。"
-                    } else {
-                        message = nil
-                    }
+                    locate(with: scan, model: model)
                 }
             }
 
@@ -313,6 +319,84 @@ final class CollectionModel: NSObject, ObservableObject, CLLocationManagerDelega
                 return
             }
         }
+    }
+
+    /// One request = 1…maxScans scans. Rescan while unsure, then publish the fix and start a new request.
+    private func locate(with scan: WiFiScan, model: WiFiKNN) {
+        guard scan.hasBSSID else {
+            message = "本轮没有 BSSID。请检查 macOS 定位权限。"
+            return
+        }
+        guard !scan.isRapidResponse else {
+            message = nil
+            return
+        }
+        pendingScans.append(scan)
+        let prediction = model.predict(scans: pendingScans.map(\.accessPoints))
+        message = prediction == nil ? "与指纹库重合的接入点太少。" : nil
+        guard WiFiKNN.isFinished(prediction, scanCount: pendingScans.count) else {
+            pendingPrediction = prediction
+            return
+        }
+        if let prediction {
+            localizationFix = LocalizationFix(prediction: prediction, time: scan.endedAt)
+        }
+        logTrial(prediction)
+        pendingScans = []
+        pendingPrediction = nil
+    }
+
+    private func logTrial(_ prediction: KNNPrediction?) {
+        guard let truthPoint, let first = pendingScans.first, let last = pendingScans.last else { return }
+        func ms(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1000).rounded()) }
+        let trial = LiveTrial(
+            truth: truthPoint.name, predicted: prediction?.point.name,
+            correct: prediction?.point == truthPoint, ratio: prediction?.ratio,
+            band: prediction?.band.rawValue, scanCount: pendingScans.count,
+            threshold: WiFiKNN.confidenceThreshold,
+            latencyS: last.endedAt.timeIntervalSince(first.startedAt),
+            scans: pendingScans.map {
+                LiveTrial.Scan(startedAtMs: ms($0.startedAt), endedAtMs: ms($0.endedAt),
+                               accessPoints: $0.accessPoints)
+            })
+        do {
+            let encoder = JSONEncoder()
+            encoder.keyEncodingStrategy = .convertToSnakeCase
+            encoder.outputFormatting = .sortedKeys
+            var line = try encoder.encode(trial)
+            line.append(0x0A)
+            try FileManager.default.createDirectory(at: liveTestDirectory, withIntermediateDirectories: true)
+            let day = first.startedAt.formatted(.iso8601.year().month().day())
+            let file = liveTestDirectory.appendingPathComponent("live-\(day).jsonl")
+            if let handle = try? FileHandle(forWritingTo: file) {
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: line)
+            } else {
+                try line.write(to: file)
+            }
+            trialCounts[truthPoint, default: 0] += 1
+        } catch {
+            message = "实时测试记录写入失败：\(error.localizedDescription)"
+        }
+    }
+
+    private struct LiveTrial: Encodable {
+        struct Scan: Encodable {
+            let startedAtMs: Int64
+            let endedAtMs: Int64
+            let accessPoints: [AccessPoint]
+        }
+
+        let truth: String
+        let predicted: String?
+        let correct: Bool
+        let ratio: Double?
+        let band: String?
+        let scanCount: Int
+        let threshold: Double
+        let latencyS: Double
+        let scans: [Scan]
     }
 
     private func save(_ scan: WiFiScan, in current: CollectionSession,
