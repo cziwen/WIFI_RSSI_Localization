@@ -96,11 +96,13 @@ private struct CollectorView: View {
 
     private func localizationPanel(fix: LocalizationFix?, current: Bool) -> some View {
         VStack(alignment: .leading, spacing: 15) {
-            Label("\(WiFiKNN.neighborCount)-NN 分类", systemImage: "location.viewfinder")
+            Label("自适应 \(WiFiKNN.neighborCount)-NN · 5 GHz 优先", systemImage: "location.viewfinder")
                 .font(.headline)
             if let training = model.training {
-                Text("\(WiFiKNN.featureFilter.rawValue) · \(training.featureCount) 个 AP")
+                Text("\(WiFiKNN.featureFilter.rawValue) · \(training.featureCount) 个 AP（5 GHz \(training.fiveGHzCount) 个）")
                     .foregroundStyle(.secondary)
+                Text("r < τ = \(WiFiKNN.confidenceThreshold.formatted()) 即输出 · 否则再扫，最多 \(WiFiKNN.maxScans) 次")
+                    .font(.caption).foregroundStyle(.secondary)
                 Text("指纹库 · \(training.sampleCount) 条指纹 · \(training.references.count) 个参考点")
                     .foregroundStyle(.secondary)
                 if training.duplicateCount > 0 {
@@ -123,6 +125,10 @@ private struct CollectorView: View {
                 Text(fix.prediction.point.name)
                     .font(.system(.title, design: .monospaced).weight(.semibold))
                     .foregroundStyle(Color.accentColor)
+                let r = fix.prediction.ratio.formatted(.number.precision(.fractionLength(2)))
+                Text("r = \(r) · \(fix.prediction.band.rawValue) · 扫描 \(fix.prediction.scanCount) 次"
+                     + (fix.prediction.bandsAgree ? "" : " · 双频不一致"))
+                    .font(.caption.monospacedDigit())
                 ForEach(fix.prediction.closest, id: \.point) { match in
                     let distance = sqrt(match.distance).formatted(.number.precision(.fractionLength(1)))
                     Text("\(match.point.name) · 距离 \(distance) · 重合 \(match.overlap) 个 AP")
@@ -138,6 +144,14 @@ private struct CollectorView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            if model.isLocalizing && model.pendingScanCount > 0 {
+                let r = model.pendingPrediction.map {
+                    $0.ratio.formatted(.number.precision(.fractionLength(2)))
+                } ?? "—"
+                Text("不确定（r = \(r)），再扫一次 · 已扫 \(model.pendingScanCount)/\(WiFiKNN.maxScans)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.orange)
+            }
             if model.isLocalizing && model.latestScan?.isRapidResponse == true {
                 Text("已跳过快速返回，等待下一轮有效扫描。")
                     .font(.caption)
@@ -150,6 +164,22 @@ private struct CollectorView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
+            Divider()
+            Toggle("双频一致性检查（5 GHz 与全部频段结论不同时重扫）", isOn: $model.requireBandAgreement)
+                .font(.caption)
+                .disabled(model.isRunning)
+            Picker("实际点位", selection: $model.truthPoint) {
+                Text("不记录").tag(GridPoint?.none)
+                ForEach(0..<9) { index in
+                    Text(GridPoint(index: index).name).tag(GridPoint?.some(GridPoint(index: index)))
+                }
+            }
+            .disabled(model.isRunning)
+            if let truth = model.truthPoint {
+                Text("实时测试：\(truth.name) 已记录 \(model.loggedTrials)/\(CollectionModel.trialsPerPoint) 次，满后自动停止并提示音")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
             if model.isLocalizing {
                 Button(action: model.stop) {
                     Label(model.isStopping ? "正在停止…" : "停止定位", systemImage: "stop.fill")

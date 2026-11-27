@@ -21,9 +21,14 @@ struct Fingerprint: Hashable, Sendable {
     }
 
     static func meanSquaredDistance(_ left: [String: Int], _ right: [String: Int]) -> Double {
+        meanSquaredDistance(left.mapValues(Double.init), right)
+    }
+
+    /// `left` may be an average of several scans, so its readings are not whole dBm.
+    static func meanSquaredDistance(_ left: [String: Double], _ right: [String: Int]) -> Double {
         let keys = Set(left.keys).union(right.keys)
         let sum = keys.sorted().reduce(0.0) { sum, key in
-            let delta = Double(left[key] ?? -100) - Double(right[key] ?? -100)
+            let delta = (left[key] ?? -100) - Double(right[key] ?? -100)
             return sum + delta * delta
         }
         return sum / Double(keys.count)
@@ -35,6 +40,8 @@ struct FingerprintDataset {
     let ignoredCount: Int
     let duplicateCount: Int
     let networkNames: [String: String]
+    /// Last channel seen for each BSSID; used to tell 2.4 GHz (≤ 14) from 5 GHz.
+    let channels: [String: Int]
 
     init(directory: URL, collectMetadata: Bool = false) {
         let files = SampleStore.scanFiles(in: directory)
@@ -47,6 +54,7 @@ struct FingerprintDataset {
         var seen = Set<Fingerprint>()
         var ignored = 0
         var names: [String: String] = [:]
+        var channels: [String: Int] = [:]
 
         for file in files {
             guard let data = try? Data(contentsOf: file),
@@ -59,6 +67,12 @@ struct FingerprintDataset {
             guard !signals.isEmpty else {
                 ignored += 1
                 continue
+            }
+
+            for accessPoint in sample.accessPoints {
+                if let bssid = Fingerprint.bssid(for: accessPoint), let channel = accessPoint.channel {
+                    channels[bssid] = channel
+                }
             }
 
             if collectMetadata {
@@ -77,6 +91,7 @@ struct FingerprintDataset {
         self.ignoredCount = ignored
         duplicateCount = files.count - ignored - fingerprints.count
         networkNames = names
+        self.channels = channels
     }
 }
 
